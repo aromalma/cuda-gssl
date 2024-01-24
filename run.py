@@ -1,4 +1,5 @@
 import numpy as np 
+np.random.seed(2)
 a= np.random.randint(5,size=(3,3),)
 # a=np.ones((3,3))
 a=a.astype(np.float32)
