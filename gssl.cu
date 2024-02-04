@@ -2,60 +2,79 @@
 #include <pybind11/numpy.h>
 #include <iostream>
 #include <math.h>
+#include "kernels.h"
 namespace py = pybind11;
-
-__global__ void weight_matrix_calc(float *a,float *b, float * c,int n,int d) {
-
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    // int k = blockIdx.z * blockDim.z + threadIdx.z; 
-    int k;
-    // weight matrix is symmetric only cal for upper traingle
-    if (i<n && j <n && j>i  ) { 
-        int s=0;
-        for (k=0;k<d;k++){
-            s+=pow((a[i*d+k]-b[j*d+k]),2); 
-            }
-        c[i*n+j]=s;
-        c[i+n*j]=s;
-    }
-    i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n)c[i*n+i]=0.0;
-}
 
 class CudaGSSL {
     public:
-        float *a,*c_a;
-        float *w,*c_w;
+        double *a,*c_a;
+        double *w,*c_w,*c_wi;
         int n=1;
         std::vector<ssize_t> shape;
+        double *c_te,*te;
 
-        CudaGSSL(py::array_t<float> & arr){
+        CudaGSSL(py::array_t<double> & arr){
             auto buf = arr.request();
-            a = (float *)buf.ptr;
+            a = (double *)buf.ptr;
             shape = buf.shape;
             for(int i:shape){n*=i;}
             // std::cout<<n<<"#@#@#";
-            w = new float [shape[0]*shape[0]];
-            cudaMalloc( &c_a,n* sizeof(float));
-            cudaMalloc( &c_w,shape[0]*shape[0]* sizeof(float));
+            w = new double [shape[0]*shape[0]];
+            te= new double [shape[0]+1];
+            cudaMalloc( &c_a,n* sizeof(double));
+            cudaMalloc( &c_w,shape[0]*shape[0]* sizeof(double));
+            cudaMalloc( &c_wi,shape[0]*shape[0]* sizeof(double));
+            for(int k=0;k<shape[0];k++){te[k]=0.0;}
+            cudaMalloc(&c_te,(shape[0]+1)*sizeof(double));
+            cudaMemcpy( c_te, te, (shape[0]+1) * sizeof(double),cudaMemcpyHostToDevice );
+        }
+        ~CudaGSSL(){
+            delete [] w;
+            delete [] te;
+            cudaFree(c_a);
+            cudaFree(c_wi);
+            cudaFree(c_w);
+            cudaFree(c_te);
+            
+        }
+        py::array_t<double> get_wi(){
+            double *wi=new double [shape[0]*shape[0]];
+            cudaMemcpy(wi,c_wi,shape[0]*shape[0]* sizeof(double),cudaMemcpyDeviceToHost);
+
+            py::array_t<double> numpy_array({shape[0],shape[0]}, wi);
+            return numpy_array;    
         }
 
-        py::array_t<float> get_w(){
-            cudaMemcpy(w,c_w,shape[0]*shape[0]* sizeof(float),cudaMemcpyDeviceToHost);
-            py::array_t<float> numpy_array({shape[0],shape[0]}, w);
+        py::array_t<double> get_w(){
+            cudaMemcpy(w,c_w,shape[0]*shape[0]* sizeof(double),cudaMemcpyDeviceToHost);
+            py::array_t<double> numpy_array({shape[0],shape[0]}, w);
             return numpy_array;    
         }
 
         void gen_w(){
-        // void gen_w(){
 
-            cudaMemcpy( c_a, a, n * sizeof(float),cudaMemcpyHostToDevice );
-            cudaMemcpy( c_w, w, shape[0]*shape[0]* sizeof(float),cudaMemcpyHostToDevice );
-            dim3 threads(32,32);
-            dim3 grids((n + threads.x - 1) / threads.x, (n + threads.y - 1) / threads.y);;
-            weight_matrix_calc<<<grids,threads>>>(c_a,c_a,c_w,shape[0],shape[1]);
+
+            cudaMemcpy( c_a, a, n * sizeof(double),cudaMemcpyHostToDevice );
+
+            dim3 block_dim(BLK,BLK) ;
+            int threadsPerBlock = 256;
+            int blocksPerGrid = (shape[0] + threadsPerBlock - 1) / threadsPerBlock;
+            dim3 grids_dim((n*2 + block_dim.x - 1) / block_dim.x, (n*2 + block_dim.y - 1) / block_dim.y);
+            weight_matrix_calc<<<grids_dim,block_dim>>>(c_a,c_a,c_w,shape[0],shape[1] );
             cudaDeviceSynchronize();
+            // GET MEAN OF ELEMENTS
+            mean<<<grids_dim,block_dim>>>(c_w, c_te,shape[0]);
+            cudaDeviceSynchronize();
+            //SIGMA^2 TAKEN AS 0.05*MEAN
+            final_weight_matrix<<<grids_dim,block_dim>>>(c_w, c_te,shape[0]);
+            cudaDeviceSynchronize();
+            // FIND D^0.5 FOR NORMALIZE
+            find_D<<<blocksPerGrid,threadsPerBlock>>>(c_w,c_te,shape[0]);
+            cudaDeviceSynchronize();
+            // D W D
+            normalise<<<grids_dim,block_dim>>>(c_w,c_wi,c_te,shape[0]);
+            cudaDeviceSynchronize();
+   
             cudaError_t cudaError = cudaGetLastError();
             if (cudaError != cudaSuccess) {
                 fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(cudaError));
@@ -65,16 +84,58 @@ class CudaGSSL {
             return;
         }
 
+        py::array_t<double> label_prop(py::array_t<double>  arr){
+        // void label_prop(py::array_t<double> & arr){
+            auto buf = arr.request();
+            double *y,*c_y; //*c_wi,
+            
+            y = (double *)buf.ptr;
+            
+            // t_c= new double [shape[0]];
+            shape = buf.shape;
+            dim3 block_dim(BLK,BLK);
+            dim3 grids_dim((2*n + block_dim.x - 1) / block_dim.x, (2*n + block_dim.y - 1) / block_dim.y);
 
+            cudaMalloc(&c_y, shape[0]*shape[1]*sizeof(double));
+            cudaMemcpy(c_y,y , shape[0]*shape[1]*sizeof(double),cudaMemcpyHostToDevice );
 
+            // for find inverse 
+            for(int k=0;k<shape[0];k++){
+                // break;
+                // cudaDeviceSynchronize();
+                // non_zero<<<(shape[0]+1023)/1024,1024>>>(c_w,c_te,k,shape[0]);
+                // cudaDeviceSynchronize();
+                // if (k==0)break;
+                // swap<<<(2*shape[0]+(BLK*BLK)-1)/(BLK*BLK),BLK*BLK>>>(c_w, c_wi,c_te,k,shape[0]);
+
+                // cudaDeviceSynchronize();
+                //TODO: can be more parallelizable
+                order_rows<<<1,1>>>(c_w,c_wi,c_te,k,shape[0]);
+                cudaDeviceSynchronize();
+   
+                row_opera<<<grids_dim,block_dim>>>(c_w,c_wi,c_te,k,shape[0]);
+                cudaDeviceSynchronize();
+
+            }
+
+            double *res;
+            cudaMalloc(&res, shape[0]*shape[1]*sizeof(double));
+            mat_mul<<<grids_dim,block_dim>>>(c_wi,c_y,res,shape[0],shape[1]);
+
+            cudaMemcpy(y,res,shape[0]*shape[1]* sizeof(double),cudaMemcpyDeviceToHost);
+            py::array_t<double> numpy_array({shape[0],shape[1]}, y);
+            return numpy_array;    
+        }
 };
 
-PYBIND11_MODULE(gssl,m ) { // cpp_sort is module name , m is interface for binding  
-    py::class_<CudaGSSL>(m, "CudaGSSL") // exposes the class to python as cpp_ 
-        .def(py::init<py::array_t<float> &>()) //  expose the class constructor function,  array as input
-        .def("gen_w", &CudaGSSL::gen_w) // expose the heapsort function from cpp_ class
-        .def("get_w", &CudaGSSL::get_w);
-        // .def_readwrite("gen_w", &test::n); //expose variable n,  rename as array_size
+PYBIND11_MODULE(gssl,m ) { 
+    py::class_<CudaGSSL>(m, "CudaGSSL") 
+        .def(py::init<py::array_t<double> &>()) 
+        .def("gen_w", &CudaGSSL::gen_w) 
+        .def("get_w", &CudaGSSL::get_w)
+        .def("get_wi", &CudaGSSL::get_wi)
+        .def("label_prop",&CudaGSSL::label_prop);
+        
 
 }
 //nvcc -arch=compute_60 -code=sm_60 -O3  -shared -std=c++11 -Xcompiler -fPIC $(python3 -m pybind11 --includes) gssl.cu -o gssl$(python3-config --extension-suffix)
