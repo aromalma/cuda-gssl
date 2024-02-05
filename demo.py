@@ -10,6 +10,7 @@ X = np.array(iris.data)
 y = np.array(iris.target)
 for ii in range(0,len(y),20):
     y[ii:ii+19]=-1
+
 # print(y==-1,np.sum(y==-1))
 
 
@@ -34,14 +35,19 @@ g.get_w()
 
 p=g.label_prop(one_hot)
 #
-print(g.get_wi())
+print("Final Inverse Matrix\n",g.get_wi(),"\n")
 
 
 res=np.argmax(p,axis=1)
 
-print("Total:",len(y))
+print("Total Data Instance:",len(y))
 # print(y)
-print("total_labelled:",np.sum(y!=-1))
+
+print("Total Labelled:",np.sum(y!=-1))
 print("Total Unlabelled:",np.sum(y==-1))
+print("-1 denotes unlabelled data")
+print("Before Labelling: ",y)
+print("After Labelling: ",res)
+print("Actual Labels: ",iris.target)
 print("Accuracy :",np.mean(iris.target==res)*100,"%")
 
