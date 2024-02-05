@@ -8,7 +8,7 @@ import subprocess
 
 from setuptools import setup
 
-from setuptools_cuda import CudaExtension
+# from setuptools_cuda import CudaExtension
 from setuptools.command.build_ext import build_ext
 # from torch.utils.cpp_extension  import CudaExtension
 # class CustomBuildExtension(build_ext):
