@@ -2,9 +2,10 @@
 
 CUDA-GSSL is a library for Graph Semi-Supervised Learning (GSSL) implemented in CUDA.
 
+
 ## Installation
 
-To install CUDA-GSSL, follow these steps:
+To compile CUDA-GSSL, follow these steps (Assuming make, Cudatoolkit already present):
 
 1. Clone the repository:
 
